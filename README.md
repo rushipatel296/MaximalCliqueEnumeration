@@ -4,7 +4,7 @@ Three algorithms for listing every maximal clique in a graph, written in C++ and
 
 **Live demo:** https://rushipatel296.github.io/MaximalCliqueEnumeration/
 
-[![Playground](docs/preview.png)](https://rushipatel296.github.io/MaximalCliqueEnumeration/)
+[![Playground: an editable graph with a step-by-step animation of each algorithm](docs/preview.png)](https://rushipatel296.github.io/MaximalCliqueEnumeration/)
 
 ## What's inside
 
@@ -14,7 +14,7 @@ Three algorithms for listing every maximal clique in a graph, written in C++ and
 | **Tomita** (Tomita, Tanaka & Takahashi) | Bron–Kerbosch with the max-neighbour pivot rule, worst-case O(3<sup>n/3</sup>) | [`src/tomita.cpp`](src/tomita.cpp) |
 | **Chiba** (after Chiba & Nishizeki) | Degree-ordered include/exclude backtracking with a maximality check at the leaves | [`src/chiba.cpp`](src/chiba.cpp) |
 
-The demo site in [`docs/`](docs) has an interactive playground that runs JS ports of all three on a graph you can edit, plus the benchmark results.
+The demo site in [`docs/`](docs) has a live playground that runs JS ports of all three on a graph you can edit: drag nodes (with a force layout), add or remove nodes and edges, and step through each algorithm while it highlights the clique being built, the candidate and excluded sets, and every maximal clique as it is found. It also has the benchmark results.
 
 ## Results
 

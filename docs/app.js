@@ -115,9 +115,108 @@
 
   const RUNNERS = { els: runEls, tomita: runTomita, chiba: runChiba };
 
+  // ---------- step-by-step versions (generators that yield one event per search step) ----------
+
+  const ANIM_EVENT_LIMIT = 60000;
+  const setStr = (s) => `{${[...s].join(', ')}}`;
+  const ev = (kind, R, P, X, focus, msg) => ({ kind, R: [...R], P: [...P], X: [...X], focus, msg });
+
+  function* bkGen(adj, R, P, X, st) {
+    st.calls++;
+    yield ev('call', R, P, X, -1, `Call ${st.calls}: R = ${setStr(R)}, P = ${setStr(P)}, X = ${setStr(X)}.`);
+    if (P.size === 0) {
+      if (X.size === 0) {
+        st.found++;
+        yield ev('found', R, P, X, -1, `P and X are both empty, so ${setStr(R)} is a maximal clique.`);
+      } else {
+        yield ev('dead', R, P, X, -1, `P is empty but X is not: ${setStr(R)} can still grow with a vertex already covered, so it is not reported.`);
+      }
+      return;
+    }
+    let pivot = -1, best = -1;
+    for (const S of [P, X]) for (const u of S) {
+      let c = 0;
+      for (const w of P) if (adj[u].has(w)) c++;
+      if (c > best) { best = c; pivot = u; }
+    }
+    yield ev('pivot', R, P, X, pivot, `Pivot ${pivot} has ${best} neighbour${best === 1 ? '' : 's'} in P, so only the non-neighbours of ${pivot} need a branch.`);
+    for (const v of [...P]) {
+      if (adj[pivot].has(v)) continue;
+      yield ev('branch', R, P, X, v, `Branch: add ${v} to R and keep only its neighbours in P and X.`);
+      const P2 = new Set(), X2 = new Set();
+      for (const w of P) if (adj[v].has(w)) P2.add(w);
+      for (const w of X) if (adj[v].has(w)) X2.add(w);
+      R.push(v);
+      yield* bkGen(adj, R, P2, X2, st);
+      R.pop();
+      P.delete(v);
+      X.add(v);
+    }
+  }
+
+  function* elsGen(adj, st) {
+    const order = degeneracyOrder(adj);
+    const rank = new Array(adj.length);
+    order.forEach((v, i) => { rank[v] = i; });
+    for (const v of order) {
+      const P = new Set(), X = new Set();
+      for (const w of adj[v]) (rank[w] > rank[v] ? P : X).add(w);
+      yield ev('outer', [v], P, X, v, `Start at vertex ${v} (position ${rank[v] + 1} in degeneracy order). Later neighbours go in P, earlier ones in X.`);
+      yield* bkGen(adj, [v], P, X, st);
+    }
+  }
+
+  function* tomitaGen(adj, st) {
+    for (let v = 0; v < adj.length; v++) {
+      const P = new Set(), X = new Set();
+      for (const w of adj[v]) (w > v ? P : X).add(w);
+      yield ev('outer', [v], P, X, v, `Start at vertex ${v}. Neighbours with a larger id go in P, smaller ones in X.`);
+      yield* bkGen(adj, [v], P, X, st);
+    }
+  }
+
+  function* chibaGen(adj, st) {
+    const n = adj.length;
+    const order = [...adj.keys()].sort((a, b) => adj[b].size - adj[a].size || a - b);
+    const C = [];
+    const skipped = [];
+    const cands = (i) => order.slice(i).filter((w) => C.every((u) => adj[u].has(w)));
+    function* update(i) {
+      st.calls++;
+      if (i === n) {
+        if (!C.length) return;
+        const ext = adj.findIndex((_, w) => !C.includes(w) && C.every((u) => adj[u].has(w)));
+        if (ext < 0) {
+          st.found++;
+          yield ev('found', C, [], skipped, -1, `Leaf: nothing can extend ${setStr(C)}, so it is a maximal clique.`);
+        } else {
+          yield ev('dead', C, [], skipped, ext, `Leaf: ${setStr(C)} is not maximal, vertex ${ext} is adjacent to all of it.`);
+        }
+        return;
+      }
+      const v = order[i];
+      const fits = C.every((u) => adj[u].has(v));
+      yield ev('branch', C, cands(i), skipped, v, fits
+        ? `Vertex ${v} is adjacent to all of ${setStr(C)}: try with it, then without it.`
+        : `Vertex ${v} is not adjacent to all of ${setStr(C)}: skip it.`);
+      if (fits) {
+        C.push(v);
+        yield* update(i + 1);
+        C.pop();
+      }
+      skipped.push(v);
+      yield* update(i + 1);
+      skipped.pop();
+    }
+    yield* update(0);
+  }
+
+  const GENS = { els: elsGen, tomita: tomitaGen, chiba: chibaGen };
+
   // ---------- graph state ----------
 
-  const state = { n: 0, adj: [], pos: [], cliques: [], selected: 0, picked: -1 };
+  const MAX_NODES = 40;
+  const state = { n: 0, adj: [], pos: [], vel: [], cliques: [], selected: 0, picked: -1, physics: true };
 
   function randomGraph(n, p) {
     const adj = Array.from({ length: n }, () => new Set());
@@ -133,44 +232,69 @@
       const a = (2 * Math.PI * i) / n;
       return { x: 0.5 + 0.35 * Math.cos(a) + (Math.random() - 0.5) * 0.05, y: 0.5 + 0.35 * Math.sin(a) + (Math.random() - 0.5) * 0.05 };
     });
-    const k = 0.9 / Math.sqrt(Math.max(n, 1));
-    let t = 0.08;
-    for (let it = 0; it < 350; it++) {
-      const disp = pos.map(() => ({ x: 0, y: 0 }));
-      for (let i = 0; i < n; i++) {
-        for (let j = i + 1; j < n; j++) {
-          let dx = pos[i].x - pos[j].x, dy = pos[i].y - pos[j].y;
-          const d = Math.max(Math.hypot(dx, dy), 1e-4);
-          let f = (k * k) / d;
-          if (adj[i].has(j)) f -= (d * d) / k;
-          dx = (dx / d) * f; dy = (dy / d) * f;
-          disp[i].x += dx; disp[i].y += dy;
-          disp[j].x -= dx; disp[j].y -= dy;
-        }
-        disp[i].x += (0.5 - pos[i].x) * 0.05;
-        disp[i].y += (0.5 - pos[i].y) * 0.05;
+    for (let it = 0; it < 300; it++) forceStep(pos, adj, null, 0.08 * Math.pow(0.985, it));
+    return pos;
+  }
+
+  // One step of a force-directed layout in the unit square. Returns the largest move.
+  function forceStep(pos, adj, pinned, maxStep) {
+    const n = pos.length;
+    if (!n) return 0;
+    const k = 0.95 / Math.sqrt(Math.max(n, 2));
+    const disp = pos.map(() => ({ x: 0, y: 0 }));
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        let dx = pos[i].x - pos[j].x, dy = pos[i].y - pos[j].y;
+        let d = Math.hypot(dx, dy);
+        if (d < 1e-4) { dx = Math.random() - 0.5; dy = Math.random() - 0.5; d = Math.hypot(dx, dy); }
+        let f = (k * k) / d;
+        if (adj[i].has(j)) f -= (d * d) / k;
+        dx = (dx / d) * f; dy = (dy / d) * f;
+        disp[i].x += dx; disp[i].y += dy;
+        disp[j].x -= dx; disp[j].y -= dy;
       }
-      for (let i = 0; i < n; i++) {
-        const d = Math.hypot(disp[i].x, disp[i].y) || 1;
-        const s = Math.min(d, t) / d;
-        pos[i].x = Math.min(0.97, Math.max(0.03, pos[i].x + disp[i].x * s));
-        pos[i].y = Math.min(0.97, Math.max(0.03, pos[i].y + disp[i].y * s));
-      }
-      t *= 0.985;
+      disp[i].x += (0.5 - pos[i].x) * 0.12;
+      disp[i].y += (0.5 - pos[i].y) * 0.12;
     }
-    // normalise into the unit box
-    const xs = pos.map((p) => p.x), ys = pos.map((p) => p.y);
-    const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
-    const sx = maxX - minX || 1, sy = maxY - minY || 1;
-    return pos.map((p) => ({ x: (p.x - minX) / sx, y: (p.y - minY) / sy }));
+    let moved = 0;
+    for (let i = 0; i < n; i++) {
+      if (i === pinned) continue;
+      const d = Math.hypot(disp[i].x, disp[i].y) || 1;
+      const s = Math.min(d, maxStep) / d;
+      const nx = Math.min(2, Math.max(-1, pos[i].x + disp[i].x * s));
+      const ny = Math.min(2, Math.max(-1, pos[i].y + disp[i].y * s));
+      moved = Math.max(moved, Math.hypot(nx - pos[i].x, ny - pos[i].y));
+      pos[i].x = nx; pos[i].y = ny;
+    }
+    return moved;
+  }
+
+  // ---------- live physics loop ----------
+
+  let physicsRaf = 0, calmFrames = 0, heat = 0.02;
+  function kick(amount = 0.02) {
+    heat = Math.max(heat, amount);
+    calmFrames = 0;
+    if (!physicsRaf && state.physics) physicsRaf = requestAnimationFrame(physicsTick);
+  }
+  function physicsTick() {
+    physicsRaf = 0;
+    if (!state.physics) return;
+    const moved = forceStep(state.pos, state.adj, drag && drag.moved ? drag.i : null, heat);
+    heat = Math.max(0.004, heat * 0.97);
+    draw();
+    calmFrames = moved < 0.0008 ? calmFrames + 1 : 0;
+    if (calmFrames < 20 || (drag && drag.moved)) physicsRaf = requestAnimationFrame(physicsTick);
   }
 
   // ---------- compute + render panel ----------
 
   const canonical = (cl) => cl.map((c) => c.slice().sort((a, b) => a - b)).sort((a, b) => b.length - a.length || a.join() .localeCompare(b.join(), undefined, { numeric: true }));
   const keyOf = (list) => list.map((c) => c.join(',')).join('|');
+  const cliqueKey = (c) => c.slice().sort((a, b) => a - b).join(',');
 
   function recompute() {
+    resetAnim();
     const results = ALGOS.map((a) => {
       const t0 = performance.now();
       const r = RUNNERS[a.id](state.adj);
@@ -179,6 +303,7 @@
       return { ...a, ...r };
     });
     state.cliques = results[0].sorted;
+    state.cliqueIndex = new Map(state.cliques.map((c, i) => [c.join(','), i]));
     state.selected = state.cliques.length ? 0 : -1;
 
     const ref = keyOf(results[0].sorted);
@@ -186,13 +311,14 @@
       const ok = r.aborted || keyOf(r.sorted) === ref;
       const largest = r.sorted.length ? r.sorted[0].length : 0;
       const time = r.ms < 1 ? '<1 ms' : `${r.ms.toFixed(r.ms < 10 ? 1 : 0)} ms`;
-      return `<tr><td><span class="dot" style="background:var(${r.color})"></span>${r.name}${ok ? '' : ' ⚠'}</td>
+      return `<tr data-algo="${r.id}" class="${r.id === anim.algo ? 'active' : ''}"><td><span class="dot" style="background:var(${r.color})"></span>${r.name}${ok ? '' : ' ⚠'}</td>
         <td>${r.aborted ? '–' : fmtInt(r.sorted.length)}</td><td>${r.aborted ? '–' : largest}</td>
         <td>${r.aborted ? '&gt; ' + fmtInt(CHIBA_CALL_LIMIT) : fmtInt(r.calls)}</td><td>${r.aborted ? 'stopped' : time}</td></tr>`;
     }).join('');
 
     renderCliqueList();
     renderMiniHist();
+    updateNodeButtons();
     draw();
   }
 
@@ -203,10 +329,14 @@
     $('cliqueList').innerHTML = shown.map((c, i) =>
       `<button class="chip" role="option" data-i="${i}" aria-selected="${i === state.selected}">{${c.join(', ')}}</button>`
     ).join('') + (list.length > shown.length ? `<span class="muted">+${list.length - shown.length} more</span>` : '');
-    const c = list[state.selected];
+    renderHint();
+  }
+
+  function renderHint() {
+    const c = state.cliques[state.selected];
     $('hint').textContent = c
       ? `Highlighted: {${c.join(', ')}}, a maximal clique of size ${c.length}.`
-      : 'No edges yet. Click two nodes to connect them.';
+      : state.n ? 'No edges yet. Click two nodes to connect them.' : 'No nodes. Double-click the canvas or press Add node.';
   }
 
   function renderMiniHist() {
@@ -224,26 +354,158 @@
     $('miniHist').innerHTML = html;
   }
 
+  // ---------- step-by-step animation ----------
+
+  const SPEEDS = [1, 2, 4, 8, 16, 40, 120];
+  const anim = { algo: 'els', gen: null, cur: null, st: null, steps: 0, done: false, playing: false, timer: 0, found: new Set(), flash: 0 };
+
+  function resetAnim() {
+    clearTimeout(anim.timer);
+    Object.assign(anim, { gen: null, cur: null, st: null, steps: 0, done: false, playing: false, timer: 0, found: new Set(), flash: 0 });
+    renderAnimUi();
+  }
+  function ensureGen() {
+    if (anim.gen) return;
+    anim.st = { calls: 0, found: 0 };
+    anim.gen = GENS[anim.algo](state.adj, anim.st);
+    state.picked = -1;
+  }
+  function advance() {
+    ensureGen();
+    if (anim.done) return false;
+    const r = anim.gen.next();
+    if (r.done || anim.steps >= ANIM_EVENT_LIMIT) {
+      anim.done = true;
+      anim.playing = false;
+      anim.cur = r.done
+        ? { kind: 'end', R: [], P: [], X: [], focus: -1, msg: `Done. ${ALGOS.find((a) => a.id === anim.algo).name} found ${fmtInt(anim.st.found)} maximal clique${anim.st.found === 1 ? '' : 's'} in ${fmtInt(anim.st.calls)} search steps.` }
+        : { kind: 'end', R: [], P: [], X: [], focus: -1, msg: `Stopped after ${fmtInt(ANIM_EVENT_LIMIT)} steps. Try a smaller graph.` };
+      return false;
+    }
+    anim.steps++;
+    anim.cur = r.value;
+    if (r.value.kind === 'found') {
+      const key = cliqueKey(r.value.R);
+      anim.found.add(key);
+      anim.flash = performance.now();
+      const i = state.cliqueIndex.get(key);
+      const chip = i !== undefined && $('cliqueList').querySelector(`.chip[data-i="${i}"]`);
+      if (chip) chip.classList.add('found');
+    }
+    return true;
+  }
+  function renderAnimUi() {
+    const a = ALGOS.find((x) => x.id === anim.algo);
+    $('animPlay').textContent = anim.playing ? 'Pause' : anim.gen && !anim.done ? 'Resume' : anim.done ? 'Replay' : 'Run step by step';
+    $('animStep').disabled = anim.done;
+    $('animFinish').disabled = anim.done;
+    $('animReset').disabled = !anim.gen;
+    for (const b of $('algoPick').querySelectorAll('button')) b.setAttribute('aria-checked', b.dataset.algo === anim.algo);
+    for (const tr of $('compareBody').querySelectorAll('tr')) tr.classList.toggle('active', tr.dataset.algo === anim.algo);
+    const box = $('animStatus');
+    $('playground').classList.toggle('anim-on', !!anim.gen);
+    if (!anim.gen) {
+      box.hidden = true;
+      for (const c of $('cliqueList').querySelectorAll('.chip.found')) c.classList.remove('found');
+      return;
+    }
+    box.hidden = false;
+    box.style.setProperty('--accent', `var(${a.color})`);
+    $('animCounts').innerHTML = `<b>${fmtInt(anim.st.found)}</b> of ${fmtInt(state.cliques.length)} cliques found · ${fmtInt(anim.st.calls)} search steps`;
+    $('animMsg').textContent = anim.cur ? anim.cur.msg : 'Ready.';
+  }
+  function tick() {
+    if (!anim.playing) return;
+    const sp = SPEEDS[Number($('speedIn').value)];
+    // at high speeds take several steps per frame so big graphs still finish
+    const batch = sp > 40 ? Math.ceil(sp / 40) : 1;
+    let ok = true;
+    for (let k = 0; k < batch && ok; k++) {
+      ok = advance();
+      if (ok && anim.cur.kind === 'found' && sp <= 8) break;
+    }
+    renderAnimUi();
+    draw();
+    if (!ok) { anim.playing = false; renderAnimUi(); return; }
+    const pause = anim.cur.kind === 'found' ? Math.max(1000 / sp, sp <= 8 ? 650 : 0) : 1000 / Math.min(sp, 40);
+    anim.timer = setTimeout(tick, pause);
+  }
+  function play() {
+    if (anim.done) resetAnim();
+    ensureGen();
+    anim.playing = true;
+    renderAnimUi();
+    tick();
+  }
+  function pause() {
+    anim.playing = false;
+    clearTimeout(anim.timer);
+    renderAnimUi();
+  }
+
+  $('animPlay').addEventListener('click', () => (anim.playing ? pause() : play()));
+  $('animStep').addEventListener('click', () => { pause(); advance(); renderAnimUi(); draw(); });
+  $('animFinish').addEventListener('click', () => { pause(); while (advance()); renderAnimUi(); draw(); });
+  $('animReset').addEventListener('click', () => { resetAnim(); draw(); });
+  $('algoPick').addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    anim.algo = b.dataset.algo;
+    resetAnim();
+    draw();
+  });
+  $('compareBody').addEventListener('click', (e) => {
+    const tr = e.target.closest('tr');
+    if (!tr) return;
+    anim.algo = tr.dataset.algo;
+    resetAnim();
+    draw();
+  });
+  $('speedIn').addEventListener('input', (e) => { $('speedOut').textContent = `${SPEEDS[e.target.value]} steps/s`; });
+
   // ---------- canvas ----------
 
   const canvas = $('graph');
   const ctx = canvas.getContext('2d');
   let colors = {};
   const readColors = () => {
-    colors = { edge: css('--edge'), node: css('--node'), stroke: css('--node-stroke'), text: css('--text'),
-      hl: css('--series-1'), hlEdge: css('--hl-edge'), pick: css('--pick'), bg: css('--surface-2') };
+    colors = { edge: css('--edge'), node: css('--node'), stroke: css('--node-stroke'), text: css('--text'), text2: css('--text-2'),
+      hl: css('--series-1'), hlEdge: css('--hl-edge'), pick: css('--pick'), bg: css('--surface-2'), ok: css('--series-3') };
+    for (const a of ALGOS) colors[a.id] = css(a.color);
   };
 
   const PAD = 26;
   const R_NODE = () => (state.n > 26 ? 11 : 13);
+  // The view follows the graph's bounding box so it always fills the canvas.
+  // It eases toward the target and holds still while a node is being dragged.
+  let view = null, viewRaf = 0;
+  function targetView() {
+    if (!state.n) return { x0: 0, x1: 1, y0: 0, y1: 1 };
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (const p of state.pos) { x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y); }
+    const fix = (a, b) => { const m = (a + b) / 2, h = Math.max((b - a) / 2, 0.15); return [m - h, m + h]; };
+    [x0, x1] = fix(x0, x1); [y0, y1] = fix(y0, y1);
+    return { x0, x1, y0, y1 };
+  }
+  function updateView() {
+    const t = targetView();
+    if (!view) { view = t; return; }
+    if (drag && drag.moved) return;
+    let off = 0;
+    for (const k of ['x0', 'x1', 'y0', 'y1']) { view[k] += (t[k] - view[k]) * 0.18; off = Math.max(off, Math.abs(t[k] - view[k])); }
+    if (off > 0.002 && !viewRaf) viewRaf = requestAnimationFrame(() => { viewRaf = 0; draw(); });
+  }
   function toPx(p) {
     const w = canvas.clientWidth, h = canvas.clientHeight;
-    return { x: PAD + p.x * (w - 2 * PAD), y: PAD + p.y * (h - 2 * PAD) };
+    return { x: PAD + ((p.x - view.x0) / (view.x1 - view.x0)) * (w - 2 * PAD), y: PAD + ((p.y - view.y0) / (view.y1 - view.y0)) * (h - 2 * PAD) };
   }
   function fromPx(x, y) {
     const w = canvas.clientWidth, h = canvas.clientHeight;
-    return { x: Math.min(1, Math.max(0, (x - PAD) / (w - 2 * PAD))), y: Math.min(1, Math.max(0, (y - PAD) / (h - 2 * PAD))) };
+    const cx = Math.min(w - PAD / 2, Math.max(PAD / 2, x)), cy = Math.min(h - PAD / 2, Math.max(PAD / 2, y));
+    return { x: view.x0 + ((cx - PAD) / (w - 2 * PAD)) * (view.x1 - view.x0), y: view.y0 + ((cy - PAD) / (h - 2 * PAD)) * (view.y1 - view.y0) };
   }
+  const line = (a, b) => { ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); };
+  const ring = (p, r) => { ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, 2 * Math.PI); ctx.stroke(); };
 
   function draw() {
     const dpr = window.devicePixelRatio || 1;
@@ -253,40 +515,69 @@
     }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
-    const inClique = new Set(state.cliques[state.selected] || []);
+    updateView();
     const P = state.pos.map(toPx);
+    const r = R_NODE();
+    const cur = anim.gen ? anim.cur : null;
+    const animOn = !!anim.gen;
+    const accent = colors[anim.algo];
+
+    // what to emphasise
+    const inR = new Set(animOn ? (cur ? cur.R : []) : state.cliques[state.selected] || []);
+    const inP = new Set(cur ? cur.P : []);
+    const inX = new Set(cur ? cur.X : []);
+    const focus = cur ? cur.focus : -1;
+    const isFound = cur && cur.kind === 'found';
+    const isDead = cur && cur.kind === 'dead';
+    const strong = animOn ? (isFound ? colors.ok : accent) : colors.hlEdge;
 
     ctx.lineCap = 'round';
     for (let u = 0; u < state.n; u++) {
       for (const v of state.adj[u]) {
-        if (v < u) continue;
-        const hl = inClique.has(u) && inClique.has(v);
-        if (hl) continue;
+        if (v < u || (inR.has(u) && inR.has(v))) continue;
+        const faded = animOn && cur && (inX.has(u) || inX.has(v)) && !inR.has(u) && !inR.has(v) && !inP.has(u) && !inP.has(v);
+        ctx.globalAlpha = faded ? 0.35 : 1;
         ctx.strokeStyle = colors.edge; ctx.lineWidth = 1.5;
-        ctx.beginPath(); ctx.moveTo(P[u].x, P[u].y); ctx.lineTo(P[v].x, P[v].y); ctx.stroke();
+        line(P[u], P[v]);
       }
     }
-    for (const u of inClique) for (const v of inClique) {
-      if (v <= u) continue;
-      ctx.strokeStyle = colors.hlEdge; ctx.lineWidth = 3;
-      ctx.beginPath(); ctx.moveTo(P[u].x, P[u].y); ctx.lineTo(P[v].x, P[v].y); ctx.stroke();
+    ctx.globalAlpha = 1;
+    // edges from the vertex being considered to the current clique
+    if (focus >= 0 && cur && cur.kind !== 'pivot') {
+      ctx.setLineDash([4, 4]); ctx.strokeStyle = isDead ? colors.pick : accent; ctx.lineWidth = 2;
+      for (const u of inR) if (state.adj[focus].has(u)) line(P[focus], P[u]);
+      ctx.setLineDash([]);
+    }
+    for (const u of inR) for (const v of inR) {
+      if (v <= u || !state.adj[u].has(v)) continue;
+      ctx.strokeStyle = strong; ctx.lineWidth = isFound ? 4 : 3;
+      line(P[u], P[v]);
     }
 
-    const r = R_NODE();
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.font = `600 ${r > 11 ? 12 : 11}px Inter, system-ui, sans-serif`;
+    const pulse = isFound ? Math.max(0, 1 - (performance.now() - anim.flash) / 500) : 0;
     for (let u = 0; u < state.n; u++) {
-      const hl = inClique.has(u);
-      ctx.beginPath(); ctx.arc(P[u].x, P[u].y, r, 0, 2 * Math.PI);
-      ctx.fillStyle = hl ? colors.hl : colors.node; ctx.fill();
-      ctx.lineWidth = 2; ctx.strokeStyle = hl ? colors.bg : colors.stroke; ctx.stroke();
-      if (u === state.picked) {
-        ctx.beginPath(); ctx.arc(P[u].x, P[u].y, r + 5, 0, 2 * Math.PI);
-        ctx.lineWidth = 2.5; ctx.strokeStyle = colors.pick; ctx.stroke();
-      }
+      const hl = inR.has(u);
+      const fade = animOn && cur && cur.kind !== 'end' && !hl && !inP.has(u) && u !== focus;
+      ctx.globalAlpha = fade ? (inX.has(u) ? 0.55 : 0.3) : 1;
+      ctx.beginPath(); ctx.arc(P[u].x, P[u].y, r + (hl ? pulse * 4 : 0), 0, 2 * Math.PI);
+      ctx.fillStyle = hl ? strong : colors.node; ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = hl ? colors.bg : inP.has(u) ? accent : colors.stroke;
+      if (inX.has(u) && !hl) ctx.setLineDash([3, 3]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      if (inP.has(u) && !hl) { ctx.lineWidth = 2; ctx.strokeStyle = accent; ring(P[u], r + 3); }
+      ctx.globalAlpha = 1;
+      if (u === focus) { ctx.lineWidth = 2.5; ctx.strokeStyle = colors.pick; ring(P[u], r + 6); }
+      if (u === state.picked) { ctx.lineWidth = 2.5; ctx.strokeStyle = colors.pick; ring(P[u], r + 5); }
+      ctx.globalAlpha = fade ? 0.6 : 1;
       ctx.fillStyle = hl ? '#ffffff' : colors.text;
       ctx.fillText(String(u), P[u].x, P[u].y + 0.5);
+      ctx.globalAlpha = 1;
     }
+    if (pulse > 0) requestAnimationFrame(draw);
   }
 
   function nodeAt(x, y) {
@@ -300,56 +591,102 @@
     return best;
   }
 
+  // ---------- editing ----------
+
+  function updateNodeButtons() {
+    $('addNode').disabled = state.n >= MAX_NODES;
+    $('delNode').disabled = state.picked < 0;
+    $('delNode').textContent = state.picked < 0 ? 'Remove node' : `Remove node ${state.picked}`;
+  }
+  function setPicked(i) { state.picked = i; updateNodeButtons(); draw(); }
+
+  function addNode(p) {
+    if (state.n >= MAX_NODES) return;
+    state.adj.push(new Set());
+    state.pos.push(p || { x: 0.5 + (Math.random() - 0.5) * 0.3, y: 0.5 + (Math.random() - 0.5) * 0.3 });
+    state.n++;
+    state.picked = state.n - 1;
+    recompute();
+    kick(0.03);
+  }
+  function removeNode(i) {
+    if (i < 0) return;
+    const map = (v) => (v > i ? v - 1 : v);
+    state.adj = state.adj.filter((_, u) => u !== i).map((s) => new Set([...s].filter((v) => v !== i).map(map)));
+    state.pos.splice(i, 1);
+    state.n--;
+    state.picked = -1;
+    recompute();
+    kick(0.03);
+  }
+  function toggleEdge(u, v) {
+    if (state.adj[u].has(v)) { state.adj[u].delete(v); state.adj[v].delete(u); }
+    else { state.adj[u].add(v); state.adj[v].add(u); }
+    recompute();
+    kick(0.03);
+  }
+
   let drag = null;
+  const local = (e) => { const rect = canvas.getBoundingClientRect(); return { x: e.clientX - rect.left, y: e.clientY - rect.top }; };
   canvas.addEventListener('pointerdown', (e) => {
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left, y = e.clientY - rect.top;
+    const { x, y } = local(e);
     const i = nodeAt(x, y);
-    if (i < 0) { state.picked = -1; draw(); return; }
+    if (i < 0) { if (state.picked >= 0) setPicked(-1); return; }
     drag = { i, x0: x, y0: y, moved: false };
     canvas.setPointerCapture(e.pointerId);
   });
   canvas.addEventListener('pointermove', (e) => {
     if (!drag) return;
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left, y = e.clientY - rect.top;
+    const { x, y } = local(e);
     if (!drag.moved && Math.hypot(x - drag.x0, y - drag.y0) > 4) { drag.moved = true; canvas.classList.add('dragging'); }
-    if (drag.moved) { state.pos[drag.i] = fromPx(x, y); draw(); }
+    if (drag.moved) { state.pos[drag.i] = fromPx(x, y); if (state.physics) kick(0.012); else draw(); }
   });
-  canvas.addEventListener('pointerup', () => {
+  const endDrag = () => {
     if (!drag) return;
     const { i, moved } = drag;
     drag = null;
     canvas.classList.remove('dragging');
-    if (moved) return;
-    if (state.picked < 0) { state.picked = i; draw(); return; }
-    if (state.picked === i) { state.picked = -1; draw(); return; }
+    if (moved) { kick(0.012); return; }
+    if (state.picked < 0) return setPicked(i);
+    if (state.picked === i) return setPicked(-1);
     const u = state.picked;
-    if (state.adj[u].has(i)) { state.adj[u].delete(i); state.adj[i].delete(u); }
-    else { state.adj[u].add(i); state.adj[i].add(u); }
     state.picked = -1;
-    recompute();
+    toggleEdge(u, i);
+  };
+  canvas.addEventListener('pointerup', endDrag);
+  canvas.addEventListener('pointercancel', endDrag);
+  canvas.addEventListener('dblclick', (e) => {
+    const { x, y } = local(e);
+    if (nodeAt(x, y) < 0) addNode(fromPx(x, y));
   });
+  document.addEventListener('keydown', (e) => {
+    if ((e.key === 'Delete' || e.key === 'Backspace') && state.picked >= 0 && !/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) {
+      e.preventDefault();
+      removeNode(state.picked);
+    }
+  });
+  $('addNode').addEventListener('click', () => addNode());
+  $('delNode').addEventListener('click', () => removeNode(state.picked));
+  $('physicsIn').addEventListener('change', (e) => { state.physics = e.target.checked; if (state.physics) kick(0.03); });
 
   $('cliqueList').addEventListener('click', (e) => {
     const b = e.target.closest('.chip');
     if (!b) return;
+    if (anim.gen) resetAnim();
     state.selected = Number(b.dataset.i);
     for (const c of $('cliqueList').querySelectorAll('.chip')) c.setAttribute('aria-selected', c === b);
-    renderCliqueListHintOnly();
+    renderHint();
     draw();
   });
-  function renderCliqueListHintOnly() {
-    const c = state.cliques[state.selected];
-    $('hint').textContent = `Highlighted: {${c.join(', ')}}, a maximal clique of size ${c.length}.`;
-  }
 
   function newGraph() {
     state.n = Number($('nIn').value);
     state.adj = randomGraph(state.n, Number($('pIn').value));
     state.pos = layout(state.adj);
     state.picked = -1;
+    view = null;
     recompute();
+    kick(0.01);
   }
   $('nIn').addEventListener('input', (e) => { $('nOut').textContent = e.target.value; });
   $('pIn').addEventListener('input', (e) => { $('pOut').textContent = Number(e.target.value).toFixed(2); });
@@ -358,9 +695,9 @@
   $('regen').addEventListener('click', newGraph);
   $('clear').addEventListener('click', () => {
     state.adj = Array.from({ length: state.n }, () => new Set());
-    state.pos = layout(state.adj);
     state.picked = -1;
     recompute();
+    kick(0.04);
   });
 
   // ---------- tooltip ----------

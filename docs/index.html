@@ -52,23 +52,56 @@
     <section id="playground" class="panel">
       <div class="section-head">
         <h2>Playground</h2>
-        <p>Drag nodes around. Click one node, then another, to add or remove the edge between them. Every change re-runs all three algorithms.</p>
+        <p>A live graph you can edit. Drag nodes and the rest of the graph follows. Click one node, then another, to add or remove the edge between them.
+          Double-click empty space to add a node; select a node and press Delete to remove it. Then press <b>Run step by step</b> to watch an algorithm search for cliques.</p>
       </div>
 
       <div class="controls">
-        <label>Nodes <output id="nOut">18</output>
-          <input id="nIn" type="range" min="4" max="36" value="18">
+        <label>Nodes <output id="nOut">16</output>
+          <input id="nIn" type="range" min="4" max="36" value="16">
         </label>
         <label>Edge density <output id="pOut">0.35</output>
           <input id="pIn" type="range" min="0.05" max="0.8" step="0.05" value="0.35">
         </label>
-        <button id="regen" class="btn primary" type="button">New random graph</button>
-        <button id="clear" class="btn" type="button">Empty graph</button>
+        <div class="btn-row">
+          <button id="regen" class="btn primary" type="button">New random graph</button>
+          <button id="clear" class="btn" type="button">Remove all edges</button>
+          <button id="addNode" class="btn" type="button">Add node</button>
+          <button id="delNode" class="btn" type="button" disabled>Remove node</button>
+          <label class="check"><input id="physicsIn" type="checkbox" checked> Physics</label>
+        </div>
+      </div>
+
+      <div class="stepper">
+        <div class="seg" id="algoPick" role="radiogroup" aria-label="Algorithm to animate">
+          <button type="button" role="radio" data-algo="els" aria-checked="true"><span class="dot" style="background:var(--series-1)"></span>ELS</button>
+          <button type="button" role="radio" data-algo="tomita" aria-checked="false"><span class="dot" style="background:var(--series-2)"></span>Tomita</button>
+          <button type="button" role="radio" data-algo="chiba" aria-checked="false"><span class="dot" style="background:var(--series-3)"></span>Chiba</button>
+        </div>
+        <div class="btn-row">
+          <button id="animPlay" class="btn primary" type="button">Run step by step</button>
+          <button id="animStep" class="btn" type="button">Step</button>
+          <button id="animFinish" class="btn" type="button">Skip to end</button>
+          <button id="animReset" class="btn" type="button" disabled>Reset</button>
+        </div>
+        <label class="speed">Speed <output id="speedOut">4 steps/s</output>
+          <input id="speedIn" type="range" min="0" max="6" step="1" value="2">
+        </label>
       </div>
 
       <div class="play-grid">
         <div class="canvas-box">
-          <canvas id="graph" aria-label="Interactive graph. The highlighted vertices form the selected maximal clique."></canvas>
+          <canvas id="graph" aria-label="Interactive graph. Highlighted vertices show the current clique."></canvas>
+          <div class="anim-status" id="animStatus" hidden aria-live="polite">
+            <div class="anim-counts" id="animCounts"></div>
+            <div class="anim-msg" id="animMsg"></div>
+            <div class="anim-legend">
+              <span><i class="k-r"></i>R: clique being built</span>
+              <span><i class="k-p"></i>P: candidates</span>
+              <span><i class="k-x"></i>X: already covered</span>
+              <span><i class="k-f"></i>vertex in focus</span>
+            </div>
+          </div>
           <p class="hint" id="hint">Highlighted: the largest maximal clique.</p>
         </div>
 
